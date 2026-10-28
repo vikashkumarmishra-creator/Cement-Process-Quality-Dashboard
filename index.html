@@ -474,10 +474,20 @@
   .rad-kpis .kpi.hot{ box-shadow: inset 0 0 0 1px rgba(227,30,36,0.30), var(--glass-shadow); }
   .rad-kpis .kpi.hot .value{ color:var(--rust); }
   .rad-zone-review{ margin-top:18px; border-top:3px solid var(--teal); }
-  .rad-zone-kpis{ margin-top:14px; margin-bottom:0; }
+  .rad-zone-kpis{ margin-top:14px; margin-bottom:0; grid-template-columns:repeat(3,minmax(0,1fr)); }
+  .rad-zone-review > .row-between, .rad-zone-summary > .row-between{ flex-wrap:wrap; }
+  @media(max-width:800px){ .rad-zone-kpis{ grid-template-columns:repeat(2,minmax(0,1fr)); } }
+  @media(max-width:500px){ .rad-zone-kpis{ grid-template-columns:1fr; } }
   .rad-zone-summary{ margin-top:18px; padding-top:16px; border-top:1px solid var(--rule); }
   .rad-zone-summary h4{ margin:0; }
   .rad-zone-details{ margin-top:16px; }
+  .rad-low-review{ margin-top:16px; padding:12px; border:1px solid var(--rule); border-left:3px solid var(--teal); border-radius:12px; }
+  .rad-low-review h4{ margin:0 0 4px; }
+  .rad-kpis .kpi.action .value{ color:var(--rust); }
+  .rad-kpis .kpi.watch .value{ color:#9A5B00; }
+  .rad-kpis .kpi.good .value{ color:#1E7A52; }
+  html[data-theme="dark"] .rad-kpis .kpi.watch .value, html[data-theme="fusion"] .rad-kpis .kpi.watch .value{ color:#FFD08A; }
+  html[data-theme="dark"] .rad-kpis .kpi.good .value, html[data-theme="fusion"] .rad-kpis .kpi.good .value{ color:#7BE0B0; }
   .rad-zone-details .rad-table-wrap{ max-height:none; }
   @media print{ .rad-zone-details{ display:block; } .rad-zone-details > *{ display:block; } }
 
@@ -2851,7 +2861,7 @@ const PAYLOAD = {"data":{"limestone":{"ts":[1674522000,1674525600,1674529200,167
             <div><h4>Finding</h4><ul>${rad.findings.map(x=>`<li>${x}</li>`).join('')}</ul></div>
             <div><h4>Advice <small>suggested checks — verify on site</small></h4><ul>${rad.advice.map(x=>`<li>${esc(x)}</li>`).join('')}</ul></div>
           </div>
-          ${rad.burningZone ? `<div class="rad-zone-summary"><div class="row-between"><h4>${esc(rad.burningZone.title)} · Observations and checks</h4><span class="sum-chip ${rad.burningZone.tone}">${esc(rad.burningZone.chip)}</span></div>
+          ${rad.burningZone ? `<div class="rad-zone-summary"><div class="row-between"><h4>${esc(rad.burningZone.title)} · Observations and checks</h4><span class="sum-chip ${rad.burningZone.tone}">${esc(rad.burningZone.chip)}</span><span class="sum-chip ${rad.burningZone.lowTone}">Low-temperature: ${esc(({good:'Green',watch:'Yellow',action:'Red',na:'No data'})[rad.burningZone.lowTone])}</span></div>
             <p class="desc">Uses the Summary date range above. The Radiation tab has its own date window. Shell Max readings and Max–Min spreads support checks; they do not establish a failure diagnosis.</p>
             <div class="sum-ofa">
               <div><h4>Observations</h4><ul>${rad.burningZone.observations.map(x=>`<li>${esc(x)}</li>`).join('')}</ul></div>
@@ -3435,6 +3445,16 @@ const RAD_SNAPSHOT_CSV = "Timestamp,Patroller Name,Shift,Meter 1 (Max),Meter 1 (
     return ev;
   }
 
+  function lowTemperatureClass(value){
+    if(typeof value !== 'number' || !Number.isFinite(value)) return 'na';
+    return value >= 150 ? 'good' : value >= 135 ? 'watch' : 'action';
+  }
+  const lowTemperatureLabel = value => ({good:'Green',watch:'Yellow',action:'Red',na:'No data'})[lowTemperatureClass(value)];
+  const lowTemperatureWorst = values => {
+    const valid=values.filter(v=>typeof v==='number'&&Number.isFinite(v));
+    return valid.length?lowTemperatureClass(Math.min(...valid)):'na';
+  };
+  const lowTemperatureToneLabel = tone => ({good:'Green',watch:'Yellow',action:'Red',na:'No data'})[tone];
   const BURNING_ZONE = { from:12, to:22, label:'Burning zone · 12–22 m' };
 
   // Manual-patrol review: changes are prompts for checks, not diagnoses of refractory condition.
@@ -3444,7 +3464,7 @@ const RAD_SNAPSHOT_CSV = "Timestamp,Patroller Name,Shift,Meter 1 (Max),Meter 1 (
     const fmt = v => v===null || !finite(v) ? '—' : v.toFixed(1).replace(/\.0$/, '');
     const signed = v => (v>=0?'+':'') + fmt(v);
     const positions = requestedPositions.filter(p=>p>=1 && !state.tyres[p]);
-    const win = state.rows.filter(r=>r.ts>=from && r.ts<=to && r.any);
+    const win = state.rows.filter(r=>r.ts>=from && r.ts<=to && (r.any || positions.some(p=>finite(r.min[p]))));
     const prev = state.rows.filter(r=>r.ts>=pFrom && r.ts<=pTo && r.any);
     const last = win[win.length-1] || null;
     const hasValue = r => positions.some(p=>finite(r.max[p]));
@@ -3452,7 +3472,7 @@ const RAD_SNAPSHOT_CSV = "Timestamp,Patroller Name,Shift,Meter 1 (Max),Meter 1 (
     const latestZone = zoneRounds[zoneRounds.length-1] || null;
     const observations=[], findings=[], advice=[];
     const values=[], previousValues=[], spreads=[], perPosition=[];
-    let peak=null;
+    let peak=null, windowCoolest=null;
     for(const p of positions){
       const series=win.filter(r=>finite(r.max[p]));
       const current=series.map(r=>r.max[p]);
@@ -3460,6 +3480,7 @@ const RAD_SNAPSHOT_CSV = "Timestamp,Patroller Name,Shift,Meter 1 (Max),Meter 1 (
       current.forEach(v=>values.push(v)); previous.forEach(v=>previousValues.push(v));
       for(const r of series){
         if(!peak || r.max[p]>peak.value) peak={p,value:r.max[p],ts:r.ts};
+        if(!windowCoolest || r.max[p]<windowCoolest.value) windowCoolest={p,value:r.max[p],ts:r.ts};
         if(finite(r.min[p])) spreads.push({p,value:r.max[p]-r.min[p],ts:r.ts});
       }
       const latestMax=last && finite(last.max[p]) ? last.max[p] : null;
@@ -3487,6 +3508,18 @@ const RAD_SNAPSHOT_CSV = "Timestamp,Patroller Name,Shift,Meter 1 (Max),Meter 1 (
     const currentComparable=mean(comparable.map(p=>p.avg)), previousComparable=mean(comparable.map(p=>p.previousAvg));
     const latestAverage=mean(latest.map(p=>p.latestMax));
     const latestHot=latest.slice().sort((a,b)=>b.latestMax-a.latestMax)[0] || null;
+    const latestCool=latest.slice().sort((a,b)=>a.latestMax-b.latestMax)[0] || null;
+    const lowReference=150;
+    const latestBelowMax=latest.filter(p=>p.latestMax<lowReference);
+    const latestBelowMin=perPosition.filter(p=>p.latestMin!==null && p.latestMin<lowReference);
+    const lowTone=lowTemperatureWorst(perPosition.flatMap(p=>[p.latestMax,p.latestMin]));
+    const belowWindow=perPosition.map(({p})=>{
+      const maxRows=win.filter(r=>finite(r.max[p])&&r.max[p]<lowReference);
+      const minRows=win.filter(r=>finite(r.min[p])&&r.min[p]<lowReference);
+      return {p,maxCount:maxRows.length,minCount:minRows.length,
+        lowestMax:maxRows.length?Math.min(...maxRows.map(r=>r.max[p])):null,
+        lowestMin:minRows.length?Math.min(...minRows.map(r=>r.min[p])):null};
+    }).filter(p=>p.maxCount||p.minCount);
     const widest=latest.filter(p=>p.spread!==null).sort((a,b)=>b.spread-a.spread)[0] || null;
     const bad=state.invalid.filter(x=>x.ts>=from && x.ts<=to && positions.includes(x.pos)).length;
     const events=[], lastSeen=new Map(); let comparisons=0;
@@ -3529,16 +3562,21 @@ const RAD_SNAPSHOT_CSV = "Timestamp,Patroller Name,Shift,Meter 1 (Max),Meter 1 (
         if(a&&b) movement={from:a.p,to:b.p,common:common.length,previousTs:priorRound.ts,gap:(last.ts-priorRound.ts)/3600};
       }
     }
+    observations.push(`Low-temperature classification, latest round: ${lowTemperatureToneLabel(lowTone)} (worst valid Max/Min, shell positions only). Green ≥150 °C; Yellow ≥135 and <150 °C; Red <135 °C. This is separate from high-temperature reference checks.`);
+    observations.push(`Below 150 °C, latest round — Max: ${latestBelowMax.length?latestBelowMax.map(p=>posName(p.p)+' '+fmt(p.latestMax)+' °C ('+lowTemperatureLabel(p.latestMax)+')').join(', '):'none'}. Min: ${latestBelowMin.length?latestBelowMin.map(p=>posName(p.p)+' '+fmt(p.latestMin)+' °C ('+lowTemperatureLabel(p.latestMin)+')').join(', '):'none'}. Missing and invalid readings are not classified.`);
     if(!positions.length || !values.length){
       observations.push('No valid shell Max readings for this zone in the selected window.');
       findings.push('Zone condition cannot be assessed from the available readings.');
       advice.push('Record the missing metre positions and confirm the date window; do not interpret missing readings as normal temperatures.');
-      return {title,positions,observations,findings,advice,perPosition,peak,latestAverage,latestHot,widest,
+      return {title,positions,observations,findings,advice,perPosition,peak,windowCoolest,latestAverage,latestHot,latestCool,widest,lowReference,latestBelowMax,latestBelowMin,belowWindow,lowTone,
         coverage:latest.length,expected:positions.length,events,comparisons,validCount:values.length,hasData:false,
         tone:'na',chip:'No zone data',headline:'No valid zone readings',lastTs:last?last.ts:null};
     }
     observations.push(`${zoneRounds.length} inspection rounds contain zone readings; ${values.length} valid Max readings across ${positions.length} shell positions. Latest recorded round: ${last?fmtShort(last.ts):'—'}; coverage ${latest.length}/${positions.length}.`);
     observations.push(`Latest-round mean Max ${fmt(latestAverage)} °C${latestHot?`; hottest ${posName(latestHot.p)} at ${fmt(latestHot.latestMax)} °C`:''}. Window peak ${fmt(peak.value)} °C at ${posName(peak.p)} on ${fmtShort(peak.ts)}.`);
+    observations.push(`Coolest shell position in the latest round (lowest Max): ${latestCool?posName(latestCool.p)+' at '+fmt(latestCool.latestMax)+' °C':'no valid Max reading'}. Lowest recorded Max in the window: ${fmt(windowCoolest.value)} °C at ${posName(windowCoolest.p)} on ${fmtShort(windowCoolest.ts)}. These values compare Max columns; Min readings are reported separately.`);
+    if(belowWindow.length) findings.push(`Below 150 °C during the selected window: ${belowWindow.map(p=>posName(p.p)+' — Max '+p.maxCount+' reading(s)'+(p.lowestMax!==null?' (lowest '+fmt(p.lowestMax)+' °C)':'')+', Min '+p.minCount+' reading(s)'+(p.lowestMin!==null?' (lowest '+fmt(p.lowestMin)+' °C)':'')).join('; ')}. Low-temperature colours use the 150/135 °C bands; high-temperature reference checks remain separate.`);
+    if(latestBelowMax.length||latestBelowMin.length) advice.push('Recheck the listed positions below 150 °C using the same Max/Min measurement method. Compare with the same metre positions in earlier rounds, kiln running state, shell cooling and measurement conditions before interpreting the cause.');
     if(comparable.length) observations.push(`Matched-position period comparison (${comparable.length} positions): mean Max ${fmt(currentComparable)} °C vs ${fmt(previousComparable)} °C; change ${signed(currentComparable-previousComparable)} °C. Each position has equal weight.`);
     else observations.push('No overlapping position history in the previous equal-length period; period comparison is unavailable.');
     if(widest) observations.push(`Widest latest Max–Min spread: ${posName(widest.p)}, ${fmt(widest.latestMax)} / ${fmt(widest.latestMin)} °C (${fmt(widest.spread)} °C spread)${widest.spreadBaseline!==null?`; previous 7-day median spread ${fmt(widest.spreadBaseline)} °C`:''}.`);
@@ -3567,11 +3605,11 @@ const RAD_SNAPSHOT_CSV = "Timestamp,Patroller Name,Shift,Meter 1 (Max),Meter 1 (
     if(!settings.ref) advice.push('Enter the plant-approved high-temperature reference under Rise and drop review. Keep the change threshold and maximum comparison gap explicit.');
     const relativeConcern=!!(rise||persistent.length||broad.length||(local&&local.excess>=settings.thr));
     const tone=latestHits.length?'action':relativeConcern||(settings.ref&&peak.value>=settings.ref)?'watch':settings.ref?'good':'na';
-    const chip=settings.ref?(latestHits.length?'Latest above reference':peak.value>=settings.ref?'Earlier reference exceedance':'Below configured reference'):'No plant limit set';
-    return {title,positions,observations,findings,advice,perPosition,peak,latestAverage,latestHot,widest,
+    const chip=settings.ref?(latestHits.length?'Latest above reference':peak.value>=settings.ref?'Earlier reference exceedance':'Below configured reference'):'High-temp reference not set';
+    return {title,positions,observations,findings,advice,perPosition,peak,windowCoolest,latestAverage,latestHot,latestCool,widest,lowReference,latestBelowMax,latestBelowMin,belowWindow,lowTone,
       coverage:latest.length,expected:positions.length,events,comparisons,persistent,movement,
       validCount:values.length,hasData:true,tone,chip,lastTs:last.ts,mean:mean(values),previousMean:mean(previousValues),
-      headline:`${title}: peak ${fmt(peak.value)} °C at ${posName(peak.p)}; latest mean Max ${fmt(latestAverage)} °C; ${events.length} changes ≥ ${settings.thr} °C.`};
+      headline:`${title}: peak ${fmt(peak.value)} °C at ${posName(peak.p)}; latest mean Max ${fmt(latestAverage)} °C; coolest latest Max ${latestCool?fmt(latestCool.latestMax)+' °C at '+posName(latestCool.p):'unavailable'}; low-temperature ${lowTemperatureToneLabel(lowTone)} (${latestBelowMax.length} Max / ${latestBelowMin.length} Min positions <150 °C); ${events.length} changes ≥ ${settings.thr} °C.`};
   }
 
   function radiationReviewColumns(review){
@@ -3588,15 +3626,20 @@ const RAD_SNAPSHOT_CSV = "Timestamp,Patroller Name,Shift,Meter 1 (Max),Meter 1 (
     const review=analyseRadiationZone(state.fromTs,state.toTs,state.fromTs-duration,state.fromTs-1,
       Array.from({length:11},(_,i)=>i+12),BURNING_ZONE.label);
     const show=v=>v===null||!Number.isFinite(v)?'—':v.toFixed(1).replace(/\.0$/,'');
-    const metric=(label,value,sub)=>`<div class="kpi"><div class="label">${label}</div><div class="value">${value}</div><div class="sub">${sub}</div></div>`;
-    host.innerHTML=`<div class="row-between"><h3>${BURNING_ZONE.label} · Observations and checks</h3><span class="sum-chip ${review.tone}">${esc(review.chip)}</span></div>
+    const metric=(label,value,sub,tone='')=>`<div class="kpi ${tone}"><div class="label">${label}</div><div class="value">${value}</div><div class="sub">${sub}</div></div>`;
+    host.innerHTML=`<div class="row-between"><h3>${BURNING_ZONE.label} · Observations and checks</h3><span class="sum-chip ${review.tone}">${esc(review.chip)}</span><span class="sum-chip ${review.lowTone}">Low-temperature: ${lowTemperatureToneLabel(review.lowTone)}</span></div>
       <p class="desc">12 m and 22 m are included. Manual patrol readings; same date window as this tab. Tyre readings are excluded from shell comparisons.</p>
       <div class="rad-kpis rad-zone-kpis">
         ${metric('Latest-round mean Max',show(review.latestAverage)+' °C',review.lastTs?fmtShort(review.lastTs):'No readings')}
         ${metric('Burning-zone window peak',review.peak?show(review.peak.value)+' °C':'—',review.peak?posName(review.peak.p)+' · '+fmtShort(review.peak.ts):'No valid Max readings')}
+        ${metric('Coolest position, latest Max',review.latestCool?show(review.latestCool.latestMax)+' °C':'—',review.latestCool?posName(review.latestCool.p)+' · lowest Max':'No valid Max readings',lowTemperatureClass(review.latestCool?review.latestCool.latestMax:null))}
+        ${metric('Lowest Max in window',review.windowCoolest?show(review.windowCoolest.value)+' °C':'—',review.windowCoolest?posName(review.windowCoolest.p)+' · '+fmtShort(review.windowCoolest.ts):'No valid Max readings',lowTemperatureClass(review.windowCoolest?review.windowCoolest.value:null))}
         ${metric('Widest latest Max–Min spread',review.widest?show(review.widest.spread)+' °C':'—',review.widest?posName(review.widest.p):'Max and Min required')}
         ${metric('Latest Max coverage',review.coverage+' / '+review.expected,review.events.length+' rise/drop events in window')}
-      </div>${radiationReviewColumns(review)}
+      </div>
+      <div class="rad-low-review"><h4>Below 150 °C · latest round</h4><p class="desc">Green ≥150 °C · Yellow ≥135 and <150 °C · Red <135 °C. Max and Min are classified separately; the lowest valid value sets the row colour. This is a low-temperature review, separate from the high-temperature reference. Tyres are listed separately in whole-shell checks.</p><div class="rad-table-wrap"><table class="qtable"><tr><th>Metre position</th><th>Max (°C)</th><th>Min (°C)</th><th>Low-temperature classification</th></tr>
+        ${review.perPosition.filter(p=>(p.latestMax!==null&&p.latestMax<150)||(p.latestMin!==null&&p.latestMin<150)).map(p=>`<tr class="rad-click" data-pos="${p.p}"><td>${esc(posName(p.p))}</td><td class="num"><span class="sum-chip ${lowTemperatureClass(p.latestMax)}">${show(p.latestMax)} · ${lowTemperatureLabel(p.latestMax)}</span></td><td class="num"><span class="sum-chip ${lowTemperatureClass(p.latestMin)}">${show(p.latestMin)} · ${lowTemperatureLabel(p.latestMin)}</span></td><td><span class="sum-chip ${lowTemperatureWorst([p.latestMax,p.latestMin])}">${lowTemperatureToneLabel(lowTemperatureWorst([p.latestMax,p.latestMin]))}</span> · ${[p.latestMax!==null&&p.latestMax<150?'Max':'',p.latestMin!==null&&p.latestMin<150?'Min':''].filter(Boolean).join(' and ')}</td></tr>`).join('')||'<tr><td colspan="4">No valid Max or Min reading below 150 °C in the latest round.</td></tr>'}
+      </table></div></div>${radiationReviewColumns(review)}
       <details class="sum-details rad-zone-details"><summary>12–22 m position detail</summary><div class="rad-table-wrap"><table class="qtable"><tr><th>Position</th><th>Latest Max</th><th>Latest Min</th><th>Spread</th><th>Previous Max change</th><th>7-day median Max</th><th>Window mean Max</th><th>Valid Max n</th></tr>
         ${review.perPosition.map(p=>`<tr class="rad-click" data-pos="${p.p}"><td>${esc(posName(p.p))}</td><td class="num">${show(p.latestMax)}</td><td class="num">${show(p.latestMin)}</td><td class="num">${show(p.spread)}</td><td class="num">${p.delta===null?'—':(p.delta>=0?'+':'')+show(p.delta)}${p.gap!==null?`<small>${show(p.gap)} h gap${p.delta===null?' · not compared':''}</small>`:''}</td><td class="num">${show(p.baseline)}<small>${p.baselineN} prior readings</small></td><td class="num">${show(p.avg)}</td><td class="num">${p.n}</td></tr>`).join('')}
         </table></div></details><p class="desc rad-foot">Temperatures and spreads are °C. The 7-day median requires at least three earlier readings. A recorded peak changing position does not confirm movement of the physical burning zone.</p>`;
@@ -3625,8 +3668,9 @@ const RAD_SNAPSHOT_CSV = "Timestamp,Patroller Name,Shift,Meter 1 (Max),Meter 1 (
     let peak = null;
     win.forEach(r => { for(let p=1;p<=state.P;p++){ const v=r.max[p]; if(v!==null && (!peak || v>peak.v)) peak={v,p,ts:r.ts}; } });
     const last = [...win].reverse().find(r => r.any) || win[win.length-1];
-    let hot = null, valid = 0;
-    for(let p=1;p<=state.P;p++){ const v=last.max[p]; if(v!==null){ valid++; if(!hot||v>hot.v) hot={v,p}; } }
+    let hot = null, cool = null, valid = 0, low = null;
+    for(let p=1;p<=state.P;p++){ const v=last.max[p]; if(v!==null){ valid++; if(!state.tyres[p]){ if(!hot||v>hot.v) hot={v,p}; if(!cool||v<cool.v) cool={v,p}; } } }
+    win.forEach(r=>{for(let p=1;p<=state.P;p++){const v=r.max[p];if(v!==null&&!state.tyres[p]&&(!low||v<low.v))low={v,p,ts:r.ts};}});
     const posSeries = win.filter(r => r.max[state.pos] !== null);
     const pl = posSeries[posSeries.length-1], pp = posSeries[posSeries.length-2];
     const refHot = settings.ref && hot && hot.v >= settings.ref;
@@ -3636,6 +3680,8 @@ const RAD_SNAPSHOT_CSV = "Timestamp,Patroller Name,Shift,Meter 1 (Max),Meter 1 (
         <div class="sub">Shift ${esc(last.shift||'—')} · ${esc(last.name||'—')}</div></div>
       <div class="kpi ${refHot?'hot':''}"><div class="label">Hottest point, latest round</div><div class="value">${hot?hot.v+' °C':'—'}</div>
         <div class="sub">${hot?posName(hot.p):'No valid readings'}${above!==null?` · ${above} position${above===1?'':'s'} ≥ ${settings.ref} °C`:''}</div></div>
+      <div class="kpi ${cool?lowTemperatureClass(cool.v):'na'}"><div class="label">Coolest shell position, latest Max</div><div class="value">${cool?cool.v+' °C':'—'}</div><div class="sub">${cool?posName(cool.p):'No valid shell Max'} · tyres excluded</div></div>
+      <div class="kpi ${low?lowTemperatureClass(low.v):'na'}"><div class="label">Lowest shell Max in window</div><div class="value">${low?low.v+' °C':'—'}</div><div class="sub">${low?posName(low.p)+', '+fmtShort(low.ts):'No valid shell Max'}</div></div>
       <div class="kpi"><div class="label">Peak in window</div><div class="value">${peak?peak.v+' °C':'—'}</div>
         <div class="sub">${peak?`${posName(peak.p)}, ${fmtShort(peak.ts)}`:''}</div></div>
       <div class="kpi"><div class="label">${esc(posName(state.pos))}, latest Max</div><div class="value">${pl?pl.max[state.pos]+' °C':'—'}</div>
@@ -3894,7 +3940,7 @@ const RAD_SNAPSHOT_CSV = "Timestamp,Patroller Name,Shift,Meter 1 (Max),Meter 1 (
   function renderObs(win, ev){
     const out = [];
     const add = (cls, title, body, chk) => out.push(`<div class="ob ${cls}"><h4><i></i>${title}</h4><p>${body}</p>${chk?`<p class="chk">${chk}</p>`:''}</div>`);
-    const valid = win.filter(r => r.any);
+    const valid = win.filter(r => r.any || r.min.some(v=>typeof v==='number'&&Number.isFinite(v)));
     if(!valid.length){ $('radObs').innerHTML = '<p class="desc">No valid inspections in this window.</p>'; return; }
     const last = valid[valid.length-1];
 
@@ -3908,6 +3954,17 @@ const RAD_SNAPSHOT_CSV = "Timestamp,Patroller Name,Shift,Meter 1 (Max),Meter 1 (
     tops.sort((a,b)=>b.v-a.v);
     if(tops.length) add('warn', 'Hottest shell positions, latest round', tops.slice(0,3).map(t=>`${posName(t.p)} ${t.v} °C`).join(', ') + '.', 'Track whether these stay hot across shifts; a single high reading can be a measurement spot difference.');
 
+    const coolest=tops.slice().sort((a,b)=>a.v-b.v);
+    if(coolest.length) add('', 'Coolest shell positions, latest round (lowest Max)', coolest.slice(0,3).map(t=>posName(t.p)+' '+t.v+' °C').join(', ')+'.', 'These compare Max columns. Check Min readings separately; lower shell temperature alone does not establish coating build-up.');
+    const belowMax=[],belowMin=[],tyreLow=[];
+    for(let p=1;p<=state.P;p++){
+      const a=last.max[p],b=last.min[p];
+      if(state.tyres[p]){if((a!==null&&a<150)||(b!==null&&b<150))tyreLow.push(posName(p)+' (Max '+(a??'—')+', Min '+(b??'—')+' °C)');continue;}
+      if(a!==null&&a<150)belowMax.push(posName(p)+' '+a+' °C ('+lowTemperatureLabel(a)+')');
+      if(b!==null&&b<150)belowMin.push(posName(p)+' '+b+' °C ('+lowTemperatureLabel(b)+')');
+    }
+    add('', 'Below 150 °C, latest round · shell positions', 'Max: '+(belowMax.join(', ')||'none')+'. Min: '+(belowMin.join(', ')||'none')+'.', 'Green ≥150 °C; Yellow ≥135 and <150 °C; Red <135 °C. These are low-temperature review colours. Recheck against the same metre position and operating conditions.');
+    if(tyreLow.length)add('', 'Tyre readings below 150 °C · separate review',tyreLow.join('; ')+'.','Tyre surface readings are not included in the shell coolest-position comparison.');
     const rise = ev.filter(e=>e.d>0)[0], drop = ev.filter(e=>e.d<0)[0];
     if(rise) add('alert', 'Largest rise', `${posName(rise.pos)} went from ${rise.prev} to ${rise.cur} °C (+${rise.d} °C) over ${rise.gapH.toFixed(1)} h, ending ${fmtShort(rise.ts)}.`, 'Re-shoot the same spot and its neighbours. A sustained rise can point to coating loss or refractory thinning — confirm before acting.');
     if(drop) add('', 'Largest drop', `${posName(drop.pos)} went from ${drop.prev} to ${drop.cur} °C (${drop.d} °C) over ${drop.gapH.toFixed(1)} h, ending ${fmtShort(drop.ts)}.`, 'Check kiln running state, feed rate and shell cooling fans before reading it as coating build-up.');
@@ -3929,7 +3986,7 @@ const RAD_SNAPSHOT_CSV = "Timestamp,Patroller Name,Shift,Meter 1 (Max),Meter 1 (
     const bad = state.invalid.filter(x => x.ts >= state.fromTs && x.ts <= state.toTs).length;
     if(bad) add('warn', 'Entries need correction', `${bad} reading${bad>1?'s':''} in this window ${bad>1?'were':'was'} left out (out of range, non-numeric or Max below Min).`, 'See Data quality below and correct them in the response sheet.');
 
-    if(!settings.ref) add('', 'No plant limit set', 'Enter a high-temperature reference under Rise and drop review to flag hot spots against it. It is saved in this browser only.');
+    if(!settings.ref) add('', 'High-temp reference not set', 'Enter a high-temperature reference under Rise and drop review to flag hot spots against it. It is saved in this browser only.');
     $('radObs').innerHTML = out.join('');
   }
 
@@ -4038,10 +4095,15 @@ const RAD_SNAPSHOT_CSV = "Timestamp,Patroller Name,Shift,Meter 1 (Max),Meter 1 (
   window.RAD_API = {
     loaded: () => state.loaded,
     summarize(from, to, pFrom, pTo){
-      if(!state.rows.some(r=>r.ts>=from && r.ts<=to && r.any)) return null;
+      if(!state.rows.some(r=>r.ts>=from && r.ts<=to && (r.any || r.min.some(v=>typeof v==='number'&&Number.isFinite(v))))) return null;
       const allPositions=Array.from({length:state.P},(_,i)=>i+1);
       const shell=analyseRadiationZone(from,to,pFrom,pTo,allPositions,'Whole shell');
       const burningZone=analyseRadiationZone(from,to,pFrom,pTo,Array.from({length:11},(_,i)=>i+12),BURNING_ZONE.label);
+      const latestRound=state.rows.filter(r=>r.ts>=from&&r.ts<=to&&r.any).slice(-1)[0];
+      if(latestRound){
+        const tyreLow=Object.keys(state.tyres).map(Number).filter(p=>(latestRound.max[p]!==null&&latestRound.max[p]<150)||(latestRound.min[p]!==null&&latestRound.min[p]<150));
+        if(tyreLow.length)shell.observations.push('Tyre readings below 150 °C, latest round (separate from shell classification): '+tyreLow.map(p=>posName(p)+' — Max '+(latestRound.max[p]??'—')+' °C, Min '+(latestRound.min[p]??'—')+' °C').join('; ')+'.');
+      }
       const burningText=burningZone.peak ? '; burning-zone peak '+burningZone.peak.value+' °C at '+posName(burningZone.peak.p) : '; burning-zone data unavailable';
       return {tone:shell.tone,chip:shell.chip,lines:shell.observations,findings:shell.findings,advice:shell.advice,
         burningZone,headline:shell.headline+burningText,plain:shell.headline+burningText};
