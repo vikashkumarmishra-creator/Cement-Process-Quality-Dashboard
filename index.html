@@ -2519,8 +2519,14 @@ const PAYLOAD = {"data":{"limestone":{"ts":[1674522000,1674525600,1674529200,167
       fuelmill:['Residue90','RawCoalAsh','Ash','S'],
       doc:['KFLOI','CycloneLOI','DOC','DOC_SO3'],
       kilnoperation:['SpecificHeat','KilnTorque'],
-      clinker:['Fe2O3','SO3','FreeLime','LSF','SM','C3S','C2S','LiquidContent','LiterWeight']
+      clinker:['Fe2O3','FreeLime','LSF','SM','C3S','C2S','LiquidContent','LiterWeight']
     };
+    // Exclusions apply only to Summary & Actions; source data, targets and other tabs retain these parameters.
+    const EXCLUDED_PARAMETERS = {
+      rawmill:['Residue212'], kilnfeed:['Residue212'], fuelmill:['Residue212'],
+      clinker:['SO3','SiO2','Al2O3','CaO','MgO','Na2O','K2O','C3A','C4AF']
+    };
+    const includeParameter = (section, parameter) => !(EXCLUDED_PARAMETERS[section] || []).includes(parameter);
     // This explicit limit applies to the Summary; all other targets come from Dim_Parameter.
     const SUMMARY_SPECS = {
       kilnoperation:{ SpecificHeat:{ target:750, min:0, max:750, maxOnly:true, maxExclusive:true } }
@@ -2701,7 +2707,7 @@ const PAYLOAD = {"data":{"limestone":{"ts":[1674522000,1674525600,1674529200,167
         if(!DATA[sec]) return;
         const specs = { ...(SPECS[sec] || {}), ...(SUMMARY_SPECS[sec] || {}) };
         const params = [...new Set([...(PARAMETER_ORDER[sec] || []), ...Object.keys(specs)])];
-        const reps = params.filter(p => (PARAMETER_ORDER[sec] || []).includes(p) || DATA[sec][p])
+        const reps = params.filter(p => includeParameter(sec, p) && ((PARAMETER_ORDER[sec] || []).includes(p) || DATA[sec][p]))
           .map(p => paramReport(sec, p, specs[p], from, to, pFrom, pTo))
           .filter(r => PARAMETER_ORDER[sec] || r.st);
         const assessed = reps.filter(r => r.comp!==null);
@@ -2745,6 +2751,7 @@ const PAYLOAD = {"data":{"limestone":{"ts":[1674522000,1674525600,1674529200,167
       // ---- cross-section links ----
       const links = [];
       LINKS.forEach(([sa,pa,sb,pb,lag,na,nb]) => {
+        if(!includeParameter(sa, pa) || !includeParameter(sb, pb)) return;
         if(!DATA[sa] || !DATA[sb] || !DATA[sa][pa] || !DATA[sb][pb]) return;
         const c = corr(dailyMeans(sa,pa,from,to), dailyMeans(sb,pb,from,to), lag);
         if(c && Math.abs(c.r) >= 0.4) links.push({ text:`${na} → ${nb}${lag?' (next day)':''}: when ${na.toLowerCase()} rose, ${nb} tended to ${c.r>0?'rise':'fall'} (r = ${c.r.toFixed(2)}, ${c.n} days).`, r:c.r });
