@@ -473,6 +473,13 @@
   .rad-kpis .kpi .sub{ font-size:11.5px; color:var(--ink-soft); margin-top:3px; line-height:1.4; }
   .rad-kpis .kpi.hot{ box-shadow: inset 0 0 0 1px rgba(227,30,36,0.30), var(--glass-shadow); }
   .rad-kpis .kpi.hot .value{ color:var(--rust); }
+  .rad-zone-review{ margin-top:18px; border-top:3px solid var(--teal); }
+  .rad-zone-kpis{ margin-top:14px; margin-bottom:0; }
+  .rad-zone-summary{ margin-top:18px; padding-top:16px; border-top:1px solid var(--rule); }
+  .rad-zone-summary h4{ margin:0; }
+  .rad-zone-details{ margin-top:16px; }
+  .rad-zone-details .rad-table-wrap{ max-height:none; }
+  @media print{ .rad-zone-details{ display:block; } .rad-zone-details > *{ display:block; } }
 
   .rad-chart{ position:relative; height:300px; }
   .rad-chart-wide{ height:320px; }
@@ -1245,7 +1252,7 @@
           <button class="jump-btn" id="radRefresh">Refresh readings</button>
         </div>
       </div>
-      <p class="desc rad-note">This tab has its own date window. Readings are operator pyrometer patrols from the Kiln Shell Radiation form; times are IST as entered. No plant alarm limits are configured, so colours show relative temperature only.</p>
+      <p class="desc rad-note">This tab has its own date window. Readings are operator pyrometer patrols from the Kiln Shell Radiation form; times are IST as entered. Burning zone: 12–22 m inclusive. Heatmap colours show relative temperature; review prompts use the change threshold, comparison gap and any high-temperature reference you configure.</p>
     </div>
 
     <div class="rad-kpis" id="radKpis"></div>
@@ -1261,11 +1268,13 @@
         <div class="rad-chart"><canvas id="radTrendChart"></canvas></div>
       </div>
       <div class="card">
-        <h3>Observations and checks</h3>
+        <h3>Whole-shell observations and checks</h3>
         <p class="desc">Rule-based prompts from the selected window. Confirm in the field before acting.</p>
         <div id="radObs" class="rad-obs"></div>
       </div>
     </div>
+
+    <div class="card rad-zone-review" id="radBurningReview"></div>
 
     <div class="card" style="margin-top:18px;">
       <div class="row-between">
@@ -2840,8 +2849,16 @@ const PAYLOAD = {"data":{"limestone":{"ts":[1674522000,1674525600,1674529200,167
           <div class="sum-ofa">
             <div><h4>Observation</h4><ul>${rad.lines.map(x=>`<li>${x}</li>`).join('')}</ul></div>
             <div><h4>Finding</h4><ul>${rad.findings.map(x=>`<li>${x}</li>`).join('')}</ul></div>
-            <div><h4>Advice <small>suggested checks — verify on site</small></h4><ul>${rad.advice.map(x=>`<li>${x}</li>`).join('')}</ul></div>
-          </div></div>` : ''}
+            <div><h4>Advice <small>suggested checks — verify on site</small></h4><ul>${rad.advice.map(x=>`<li>${esc(x)}</li>`).join('')}</ul></div>
+          </div>
+          ${rad.burningZone ? `<div class="rad-zone-summary"><div class="row-between"><h4>${esc(rad.burningZone.title)} · Observations and checks</h4><span class="sum-chip ${rad.burningZone.tone}">${esc(rad.burningZone.chip)}</span></div>
+            <p class="desc">Uses the Summary date range above. The Radiation tab has its own date window. Shell Max readings and Max–Min spreads support checks; they do not establish a failure diagnosis.</p>
+            <div class="sum-ofa">
+              <div><h4>Observations</h4><ul>${rad.burningZone.observations.map(x=>`<li>${esc(x)}</li>`).join('')}</ul></div>
+              <div><h4>Findings</h4><ul>${rad.burningZone.findings.map(x=>`<li>${esc(x)}</li>`).join('')}</ul></div>
+              <div><h4>Advice and checks</h4><ul>${rad.burningZone.advice.map(x=>`<li>${esc(x)}</li>`).join('')}</ul></div>
+            </div></div>` : ''}
+          </div>` : ''}
         <div class="grid-2" style="margin-top:18px;">
           <div class="card"><h3>Cross-section links</h3><p class="desc">Day-average relationships in this window (|r| ≥ 0.4, at least 7 days). A link is a lead to investigate, not proof of cause.</p>
             ${links.length ? `<ul class="sum-list">${links.slice(0,6).map(l=>`<li>${l.text}</li>`).join('')}</ul>` : '<p class="desc">No strong links found in this window. Try a longer range (30–90 days).</p>'}</div>
@@ -3418,6 +3435,174 @@ const RAD_SNAPSHOT_CSV = "Timestamp,Patroller Name,Shift,Meter 1 (Max),Meter 1 (
     return ev;
   }
 
+  const BURNING_ZONE = { from:12, to:22, label:'Burning zone · 12–22 m' };
+
+  // Manual-patrol review: changes are prompts for checks, not diagnoses of refractory condition.
+  function analyseRadiationZone(from, to, pFrom, pTo, requestedPositions, title){
+    const finite = v => typeof v === 'number' && Number.isFinite(v);
+    const mean = a => a.length ? a.reduce((s,v)=>s+v,0)/a.length : null;
+    const fmt = v => v===null || !finite(v) ? '—' : v.toFixed(1).replace(/\.0$/, '');
+    const signed = v => (v>=0?'+':'') + fmt(v);
+    const positions = requestedPositions.filter(p=>p>=1 && !state.tyres[p]);
+    const win = state.rows.filter(r=>r.ts>=from && r.ts<=to && r.any);
+    const prev = state.rows.filter(r=>r.ts>=pFrom && r.ts<=pTo && r.any);
+    const last = win[win.length-1] || null;
+    const hasValue = r => positions.some(p=>finite(r.max[p]));
+    const zoneRounds = win.filter(hasValue);
+    const latestZone = zoneRounds[zoneRounds.length-1] || null;
+    const observations=[], findings=[], advice=[];
+    const values=[], previousValues=[], spreads=[], perPosition=[];
+    let peak=null;
+    for(const p of positions){
+      const series=win.filter(r=>finite(r.max[p]));
+      const current=series.map(r=>r.max[p]);
+      const previous=prev.filter(r=>finite(r.max[p])).map(r=>r.max[p]);
+      current.forEach(v=>values.push(v)); previous.forEach(v=>previousValues.push(v));
+      for(const r of series){
+        if(!peak || r.max[p]>peak.value) peak={p,value:r.max[p],ts:r.ts};
+        if(finite(r.min[p])) spreads.push({p,value:r.max[p]-r.min[p],ts:r.ts});
+      }
+      const latestMax=last && finite(last.max[p]) ? last.max[p] : null;
+      const latestMin=last && finite(last.min[p]) ? last.min[p] : null;
+      const baseline=last ? state.rows.filter(r=>r.ts<last.ts && r.ts>=last.ts-7*86400 && finite(r.max[p])).map(r=>r.max[p]) : [];
+      const history=last ? state.rows.filter(r=>r.ts<last.ts && finite(r.max[p])) : [];
+      const previousReading=history[history.length-1] || null;
+      const gap=last && previousReading ? (last.ts-previousReading.ts)/3600 : null;
+      const delta=latestMax!==null && gap>0 && gap<=settings.gap ? latestMax-previousReading.max[p] : null;
+      const tail=series.slice(-3);
+      const consecutive=tail.length===3 && tail.slice(1).every((r,i)=>r.ts>tail[i].ts && (r.ts-tail[i].ts)/3600<=settings.gap);
+      const beforeTail=consecutive ? state.rows.filter(r=>r.ts<tail[0].ts && r.ts>=tail[0].ts-7*86400 && finite(r.max[p])).map(r=>r.max[p]) : [];
+      const repeatBaseline=beforeTail.length>=3 ? median(beforeTail) : null;
+      const repeated=consecutive && (settings.ref ? tail.every(r=>r.max[p]>=settings.ref) : repeatBaseline!==null && tail.every(r=>r.max[p]-repeatBaseline>=settings.thr));
+      const spreadHistory=last ? state.rows.filter(r=>r.ts<last.ts && r.ts>=last.ts-7*86400 && finite(r.max[p]) && finite(r.min[p])).map(r=>r.max[p]-r.min[p]) : [];
+      perPosition.push({p,n:current.length,avg:mean(current),previousAvg:mean(previous),
+        latestMax,latestMin,spread:latestMax!==null&&latestMin!==null?latestMax-latestMin:null,
+        baseline:baseline.length>=3?median(baseline):null,baselineN:baseline.length,
+        spreadBaseline:spreadHistory.length>=3?median(spreadHistory):null,
+        previousTs:previousReading?previousReading.ts:null,gap,delta,repeated,
+        repeatBaseline,referenceHits:settings.ref?current.filter(v=>v>=settings.ref).length:null});
+    }
+    const latest=perPosition.filter(p=>p.latestMax!==null);
+    const comparable=perPosition.filter(p=>p.avg!==null && p.previousAvg!==null);
+    const currentComparable=mean(comparable.map(p=>p.avg)), previousComparable=mean(comparable.map(p=>p.previousAvg));
+    const latestAverage=mean(latest.map(p=>p.latestMax));
+    const latestHot=latest.slice().sort((a,b)=>b.latestMax-a.latestMax)[0] || null;
+    const widest=latest.filter(p=>p.spread!==null).sort((a,b)=>b.spread-a.spread)[0] || null;
+    const bad=state.invalid.filter(x=>x.ts>=from && x.ts<=to && positions.includes(x.pos)).length;
+    const events=[], lastSeen=new Map(); let comparisons=0;
+    for(const r of state.rows){
+      if(r.ts>to) break;
+      for(const p of positions){
+        const v=r.max[p]; if(!finite(v)) continue;
+        const prior=lastSeen.get(p);
+        if(prior && r.ts>=from){
+          const gap=(r.ts-prior.ts)/3600,delta=v-prior.value;
+          if(gap>0 && gap<=settings.gap){
+            comparisons++;
+            if(Math.abs(delta)>=settings.thr) events.push({p,ts:r.ts,previousTs:prior.ts,previous:prior.value,value:v,delta,gap,rate:delta/gap});
+          }
+        }
+        lastSeen.set(p,{ts:r.ts,value:v});
+      }
+    }
+    const rise=events.filter(e=>e.delta>0).sort((a,b)=>b.delta-a.delta)[0] || null;
+    const drop=events.filter(e=>e.delta<0).sort((a,b)=>a.delta-b.delta)[0] || null;
+    const persistent=perPosition.filter(p=>p.repeated);
+    const latestHits=settings.ref?latest.filter(p=>p.latestMax>=settings.ref):[];
+    const refHits=settings.ref?values.filter(v=>v>=settings.ref).length:null;
+    const elevated=latest.filter(p=>settings.ref?p.latestMax>=settings.ref:p.baseline!==null && p.latestMax-p.baseline>=settings.thr);
+    const clusters=[];
+    for(const point of elevated){const group=clusters[clusters.length-1];if(group && point.p===group[group.length-1]+1) group.push(point.p);else clusters.push([point.p]);}
+    const broad=clusters.filter(a=>a.length>=2);
+    const neighbours=latest.map(p=>{
+      const near=latest.filter(q=>Math.abs(q.p-p.p)===1);
+      return {...p,neighbours:near,excess:near.length?p.latestMax-mean(near.map(q=>q.latestMax)):null};
+    }).filter(p=>p.excess!==null).sort((a,b)=>b.excess-a.excess);
+    const local=neighbours[0] || null;
+    const priorRound=zoneRounds.length>=2 ? zoneRounds[zoneRounds.length-2] : null;
+    let movement=null;
+    if(last && priorRound && priorRound.ts<last.ts){
+      const common=positions.filter(p=>finite(last.max[p])&&finite(priorRound.max[p]));
+      if(common.length>=2){
+        const top = r => {const high=Math.max(...common.map(p=>r.max[p]));const ps=common.filter(p=>r.max[p]===high);return ps.length===1?{p:ps[0],v:high}:null;};
+        const a=top(priorRound),b=top(last);
+        if(a&&b) movement={from:a.p,to:b.p,common:common.length,previousTs:priorRound.ts,gap:(last.ts-priorRound.ts)/3600};
+      }
+    }
+    if(!positions.length || !values.length){
+      observations.push('No valid shell Max readings for this zone in the selected window.');
+      findings.push('Zone condition cannot be assessed from the available readings.');
+      advice.push('Record the missing metre positions and confirm the date window; do not interpret missing readings as normal temperatures.');
+      return {title,positions,observations,findings,advice,perPosition,peak,latestAverage,latestHot,widest,
+        coverage:latest.length,expected:positions.length,events,comparisons,validCount:values.length,hasData:false,
+        tone:'na',chip:'No zone data',headline:'No valid zone readings',lastTs:last?last.ts:null};
+    }
+    observations.push(`${zoneRounds.length} inspection rounds contain zone readings; ${values.length} valid Max readings across ${positions.length} shell positions. Latest recorded round: ${last?fmtShort(last.ts):'—'}; coverage ${latest.length}/${positions.length}.`);
+    observations.push(`Latest-round mean Max ${fmt(latestAverage)} °C${latestHot?`; hottest ${posName(latestHot.p)} at ${fmt(latestHot.latestMax)} °C`:''}. Window peak ${fmt(peak.value)} °C at ${posName(peak.p)} on ${fmtShort(peak.ts)}.`);
+    if(comparable.length) observations.push(`Matched-position period comparison (${comparable.length} positions): mean Max ${fmt(currentComparable)} °C vs ${fmt(previousComparable)} °C; change ${signed(currentComparable-previousComparable)} °C. Each position has equal weight.`);
+    else observations.push('No overlapping position history in the previous equal-length period; period comparison is unavailable.');
+    if(widest) observations.push(`Widest latest Max–Min spread: ${posName(widest.p)}, ${fmt(widest.latestMax)} / ${fmt(widest.latestMin)} °C (${fmt(widest.spread)} °C spread)${widest.spreadBaseline!==null?`; previous 7-day median spread ${fmt(widest.spreadBaseline)} °C`:''}.`);
+    if(movement) observations.push(`Hottest recorded position ${movement.from===movement.to?'remains at '+posName(movement.to):'changed from '+posName(movement.from)+' to '+posName(movement.to)} across the last two rounds (${movement.common} common positions, ${fmt(movement.gap)} h apart). This describes measured peak location, not confirmed movement of the burning zone.`);
+    if(rise) findings.push(`Largest rise: ${posName(rise.p)}, ${fmt(rise.previous)} → ${fmt(rise.value)} °C (${signed(rise.delta)} °C in ${fmt(rise.gap)} h; ${signed(rise.rate)} °C/h), ending ${fmtShort(rise.ts)}.`);
+    if(drop) findings.push(`Largest drop: ${posName(drop.p)}, ${fmt(drop.previous)} → ${fmt(drop.value)} °C (${signed(drop.delta)} °C in ${fmt(drop.gap)} h; ${signed(drop.rate)} °C/h), ending ${fmtShort(drop.ts)}.`);
+    if(!events.length) findings.push(comparisons?`No changes ≥ ${settings.thr} °C across ${comparisons} comparable reading pairs within ${settings.gap} h.`:`No comparable reading pairs within ${settings.gap} h; rapid-change assessment is unavailable.`);
+    if(persistent.length) findings.push(`Repeated elevation in three successive recorded inspections: ${persistent.map(p=>posName(p.p)).join(', ')}. ${settings.ref?'Each reading met or exceeded the '+settings.ref+' °C reference.':'Each reading was at least '+settings.thr+' °C above that position’s preceding 7-day median (at least three baseline readings).'} Gaps did not exceed ${settings.gap} h.`);
+    if(broad.length) findings.push(`Adjacent elevated positions in the latest round: ${broad.map(a=>a[0]+'–'+a[a.length-1]+' m').join(', ')}${settings.ref?' against the configured reference':' against their own 7-day medians'}. Check the spatial extent before interpreting an isolated spot.`);
+    if(local && local.excess>=settings.thr) findings.push(`Local temperature contrast: ${posName(local.p)} is ${fmt(local.excess)} °C above the average of ${local.neighbours.map(p=>posName(p.p)).join(' and ')} in the same round${local.neighbours.length===1?' (one adjacent position available; edge comparison only)':''}.`);
+    if(widest && widest.spreadBaseline!==null && widest.spread-widest.spreadBaseline>=settings.thr) findings.push(`The latest spread at ${posName(widest.p)} exceeds its own 7-day median spread by ${fmt(widest.spread-widest.spreadBaseline)} °C.`);
+    if(settings.ref) findings.push(`Configured reference ${settings.ref} °C: ${latestHits.length} latest positions and ${refHits}/${values.length} window Max readings at or above it. The reference is a browser setting, not an inferred plant limit.`);
+    else findings.push('No approved high-temperature reference is configured. Relative changes and profile contrasts are review prompts, not temperature-limit compliance.');
+    if(latest.length<positions.length) findings.push(`Missing latest Max readings: ${perPosition.filter(p=>p.latestMax===null).map(p=>posName(p.p)).join(', ')}.${latestZone && latestZone!==last?' The latest round containing any zone reading was '+fmtShort(latestZone.ts)+'.':''}`);
+    const missingMin=latest.filter(p=>p.latestMin===null);
+    if(missingMin.length) findings.push(`Max–Min spread cannot be assessed at ${missingMin.map(p=>posName(p.p)).join(', ')} because Min is missing.`);
+    const reviewEnd=Math.min(to,Math.floor(Date.now()/1000)+19800); // timestamps pack IST wall clock as UTC
+    const age=last?Math.max(0,(reviewEnd-last.ts)/3600):null;
+    if(age!==null && age>settings.gap) findings.push(`Last selected inspection is ${fmt(age)} h before the review endpoint; the configured comparison gap is ${settings.gap} h. Coverage is insufficient to judge the intervening period.`);
+    if(bad) findings.push(`${bad} invalid field entries in this zone were excluded; review the data-quality table before relying on a complete profile.`);
+    if(rise || persistent.length || broad.length || (local&&local.excess>=settings.thr) || latestHits.length) advice.push(`Re-measure flagged positions and adjacent metre marks using consistent pyrometer settings and spot locations. Compare repeat readings with the refractory/coating map and inspection history; shell readings alone do not establish coating loss or brick failure.`);
+    if(drop) advice.push('For temperature drops, check kiln running state, feed/fuel changes, shell cooling and measurement conditions before interpreting coating build-up.');
+    if(widest) advice.push(`Recheck Max and Min at ${posName(widest.p)} through a consistent measurement round; compare the ${fmt(widest.spread)} °C spread with its own history and neighbouring positions.`);
+    advice.push('Review coincident kiln torque, feed/fuel stability, specific heat, clinker free lime and litre weight with the process team before changing kiln operation.');
+    if(latest.length<positions.length || missingMin.length || bad || (age!==null&&age>settings.gap)) advice.push('Complete missing metre readings, correct source errors and maintain the plant patrol schedule; do not substitute older readings into an incomplete latest profile.');
+    if(!settings.ref) advice.push('Enter the plant-approved high-temperature reference under Rise and drop review. Keep the change threshold and maximum comparison gap explicit.');
+    const relativeConcern=!!(rise||persistent.length||broad.length||(local&&local.excess>=settings.thr));
+    const tone=latestHits.length?'action':relativeConcern||(settings.ref&&peak.value>=settings.ref)?'watch':settings.ref?'good':'na';
+    const chip=settings.ref?(latestHits.length?'Latest above reference':peak.value>=settings.ref?'Earlier reference exceedance':'Below configured reference'):'No plant limit set';
+    return {title,positions,observations,findings,advice,perPosition,peak,latestAverage,latestHot,widest,
+      coverage:latest.length,expected:positions.length,events,comparisons,persistent,movement,
+      validCount:values.length,hasData:true,tone,chip,lastTs:last.ts,mean:mean(values),previousMean:mean(previousValues),
+      headline:`${title}: peak ${fmt(peak.value)} °C at ${posName(peak.p)}; latest mean Max ${fmt(latestAverage)} °C; ${events.length} changes ≥ ${settings.thr} °C.`};
+  }
+
+  function radiationReviewColumns(review){
+    return `<div class="sum-ofa">
+      <div><h4>Observations</h4><ul>${review.observations.map(s=>`<li>${esc(s)}</li>`).join('')}</ul></div>
+      <div><h4>Findings</h4><ul>${review.findings.map(s=>`<li>${esc(s)}</li>`).join('')}</ul></div>
+      <div><h4>Advice and checks</h4><ul>${review.advice.map(s=>`<li>${esc(s)}</li>`).join('')}</ul></div>
+    </div>`;
+  }
+
+  function renderBurningZone(){
+    const host=$('radBurningReview'); if(!host) return;
+    const duration=Math.max(1,state.toTs-state.fromTs+1);
+    const review=analyseRadiationZone(state.fromTs,state.toTs,state.fromTs-duration,state.fromTs-1,
+      Array.from({length:11},(_,i)=>i+12),BURNING_ZONE.label);
+    const show=v=>v===null||!Number.isFinite(v)?'—':v.toFixed(1).replace(/\.0$/,'');
+    const metric=(label,value,sub)=>`<div class="kpi"><div class="label">${label}</div><div class="value">${value}</div><div class="sub">${sub}</div></div>`;
+    host.innerHTML=`<div class="row-between"><h3>${BURNING_ZONE.label} · Observations and checks</h3><span class="sum-chip ${review.tone}">${esc(review.chip)}</span></div>
+      <p class="desc">12 m and 22 m are included. Manual patrol readings; same date window as this tab. Tyre readings are excluded from shell comparisons.</p>
+      <div class="rad-kpis rad-zone-kpis">
+        ${metric('Latest-round mean Max',show(review.latestAverage)+' °C',review.lastTs?fmtShort(review.lastTs):'No readings')}
+        ${metric('Burning-zone window peak',review.peak?show(review.peak.value)+' °C':'—',review.peak?posName(review.peak.p)+' · '+fmtShort(review.peak.ts):'No valid Max readings')}
+        ${metric('Widest latest Max–Min spread',review.widest?show(review.widest.spread)+' °C':'—',review.widest?posName(review.widest.p):'Max and Min required')}
+        ${metric('Latest Max coverage',review.coverage+' / '+review.expected,review.events.length+' rise/drop events in window')}
+      </div>${radiationReviewColumns(review)}
+      <details class="sum-details rad-zone-details"><summary>12–22 m position detail</summary><div class="rad-table-wrap"><table class="qtable"><tr><th>Position</th><th>Latest Max</th><th>Latest Min</th><th>Spread</th><th>Previous Max change</th><th>7-day median Max</th><th>Window mean Max</th><th>Valid Max n</th></tr>
+        ${review.perPosition.map(p=>`<tr class="rad-click" data-pos="${p.p}"><td>${esc(posName(p.p))}</td><td class="num">${show(p.latestMax)}</td><td class="num">${show(p.latestMin)}</td><td class="num">${show(p.spread)}</td><td class="num">${p.delta===null?'—':(p.delta>=0?'+':'')+show(p.delta)}${p.gap!==null?`<small>${show(p.gap)} h gap${p.delta===null?' · not compared':''}</small>`:''}</td><td class="num">${show(p.baseline)}<small>${p.baselineN} prior readings</small></td><td class="num">${show(p.avg)}</td><td class="num">${p.n}</td></tr>`).join('')}
+        </table></div></details><p class="desc rad-foot">Temperatures and spreads are °C. The 7-day median requires at least three earlier readings. A recorded peak changing position does not confirm movement of the physical burning zone.</p>`;
+  }
+
+
   // ---------- render ----------
   function render(){
     if(!state.loaded) return;
@@ -3431,6 +3616,7 @@ const RAD_SNAPSHOT_CSV = "Timestamp,Patroller Name,Shift,Meter 1 (Max),Meter 1 (
     renderLog(win);
     renderDq();
     renderObs(win, ev);
+    renderBurningZone();
   }
 
   function renderKpis(win, ev){
@@ -3509,6 +3695,15 @@ const RAD_SNAPSHOT_CSV = "Timestamp,Patroller Name,Shift,Meter 1 (Max),Meter 1 (
     ctx.beginPath(); ctx.moveTo(a.left, y); ctx.lineTo(a.right, y); ctx.stroke();
     ctx.fillStyle = cfg.color; ctx.font = '600 11px Manrope, sans-serif'; ctx.fillText(`Reference ${cfg.y} °C`, a.left+6, y-5); ctx.restore();
   }};
+  const burningZonePlugin = { id:'radBurningZone', beforeDatasetsDraw(chart){
+    const x=chart.scales.x,a=chart.chartArea,ctx=chart.ctx;
+    const left=Math.max(a.left,x.getPixelForValue(BURNING_ZONE.from-0.5));
+    const right=Math.min(a.right,x.getPixelForValue(BURNING_ZONE.to+0.5));
+    if(right<=left) return;
+    ctx.save();ctx.fillStyle='rgba(47,111,175,0.10)';ctx.fillRect(left,a.top,right-left,a.bottom-a.top);
+    ctx.fillStyle=palette().text;ctx.font='600 11px Manrope, sans-serif';
+    ctx.fillText(right-left>130?'12–22 m burning zone':'12–22 m',left+4,a.top+27);ctx.restore();
+  }};
   // vertical tyre markers on the profile chart
   const tyrePlugin = { id:'radTyres', afterDatasetsDraw(chart){
     const x = chart.scales.x, a = chart.chartArea, c = palette(), ctx = chart.ctx;
@@ -3532,7 +3727,7 @@ const RAD_SNAPSHOT_CSV = "Timestamp,Patroller Name,Shift,Meter 1 (Max),Meter 1 (
     }
     const series = r => { const a=[]; for(let p=1;p<=state.P;p++) a.push({x:p, y: r ? r.max[p] : null}); return a; };
     $('radProfileDesc').textContent = last
-      ? `Latest round ${fmtDT(last.ts)}${prev?`, previous ${fmtDT(prev.ts)}`:''}. Window median and window highest shown for context. Tyre positions read lower because they are measured on the tyre.`
+      ? `Latest round ${fmtDT(last.ts)}${prev?`, previous ${fmtDT(prev.ts)}`:''}. Window median and window highest shown for context. Blue shading marks the 12–22 m burning zone. Tyre positions read lower because they are measured on the tyre.`
       : 'No valid inspection in this window.';
     const o = baseOpts();
     o.scales.x = { type:'linear', min:1, max:state.P, ticks:{ stepSize:2, color:c.text }, title:{ display:true, text:'Metre position along shell', color:c.text }, grid:{ color:c.grid } };
@@ -3546,7 +3741,7 @@ const RAD_SNAPSHOT_CSV = "Timestamp,Patroller Name,Shift,Meter 1 (Max),Meter 1 (
       { label:'Window median', data:med, borderColor:c.median, backgroundColor:c.median, borderWidth:1.6, pointRadius:0, borderDash:[6,4], spanGaps:false },
       { label:'Previous round', data:series(prev), borderColor:c.cool, backgroundColor:c.cool, borderWidth:1.4, pointRadius:2, spanGaps:false },
       { label:'Latest round', data:series(last), borderColor:c.hot, backgroundColor:c.hot, borderWidth:2.4, pointRadius:3, spanGaps:false }
-    ]}, options:o, plugins:[tyrePlugin, refLinePlugin] });
+    ]}, options:o, plugins:[burningZonePlugin, tyrePlugin, refLinePlugin] });
   }
 
   // ---------- heatmap (custom canvas: positions × day or × inspection) ----------
@@ -3635,9 +3830,9 @@ const RAD_SNAPSHOT_CSV = "Timestamp,Patroller Name,Shift,Meter 1 (Max),Meter 1 (
 
     ctx.font = '11px Manrope, sans-serif'; ctx.textBaseline = 'middle';
     for(let p=1;p<=state.P;p++){
-      if(tyreSet[p] || p===1 || p%5===0 || p===state.pos){
+      if(tyreSet[p] || p===1 || p%5===0 || p===state.pos || p===BURNING_ZONE.from || p===BURNING_ZONE.to){
         ctx.fillStyle = tyreSet[p] ? c.tyre : (p===state.pos ? (c.dark?'#fff':'#0F2547') : c.text);
-        ctx.fillText(tyreSet[p] ? `${p} ${tyreSet[p]}` : `Meter ${p}`, 4, padT + (p-1)*rowH + rowH/2);
+        ctx.fillText(tyreSet[p] ? `${p} ${tyreSet[p]}` : (p===BURNING_ZONE.from || p===BURNING_ZONE.to) ? `${p} m · BZ` : `Meter ${p}`, 4, padT + (p-1)*rowH + rowH/2);
       }
     }
     ctx.fillStyle = c.text; ctx.textBaseline = 'alphabetic';
@@ -3802,8 +3997,10 @@ const RAD_SNAPSHOT_CSV = "Timestamp,Patroller Name,Shift,Meter 1 (Max),Meter 1 (
       settings.ref = +$('radRef').value > 0 ? +$('radRef').value : null;
       try{ const s = JSON.parse(localStorage.getItem('rad_settings')||'{}'); Object.assign(s, settings); localStorage.setItem('rad_settings', JSON.stringify(s)); }catch(e){}
       render();
+      try{ window.dispatchEvent(new Event('rad-loaded')); }catch(e){}
     });
     $('radEvents').addEventListener('click', e => { const tr = e.target.closest('tr[data-pos]'); if(tr) selectPos(+tr.dataset.pos); });
+    $('radBurningReview').addEventListener('click', e => { const tr=e.target.closest('tr[data-pos]'); if(tr) selectPos(+tr.dataset.pos); });
 
     const heat = $('radHeat'), tip = $('radHeatTip');
     heat.addEventListener('mousemove', e => {
@@ -3841,46 +4038,13 @@ const RAD_SNAPSHOT_CSV = "Timestamp,Patroller Name,Shift,Meter 1 (Max),Meter 1 (
   window.RAD_API = {
     loaded: () => state.loaded,
     summarize(from, to, pFrom, pTo){
-      const win = state.rows.filter(r => r.ts >= from && r.ts <= to && r.any);
-      if(!win.length) return null;
-      const prev = state.rows.filter(r => r.ts >= pFrom && r.ts <= pTo && r.any);
-      const shellMean = rows => { const v=[]; rows.forEach(r => { for(let p=1;p<=state.P;p++) if(!state.tyres[p] && r.max[p]!==null) v.push(r.max[p]); }); return v.length ? v.reduce((a,b)=>a+b,0)/v.length : null; };
-      let peak = null; win.forEach(r => { for(let p=1;p<=state.P;p++){ const v=r.max[p]; if(v!==null && (!peak || v>peak.v)) peak={v,p,ts:r.ts}; } });
-      const perPos = []; for(let p=1;p<=state.P;p++){ if(state.tyres[p]) continue; const v = win.map(r=>r.max[p]).filter(x=>x!==null); if(v.length) perPos.push({p, avg:v.reduce((a,b)=>a+b,0)/v.length}); }
-      perPos.sort((a,b)=>b.avg-a.avg);
-      // sudden changes in this window, same rule as the radiation tab
-      let ev = 0; const last = new Array(state.P+1).fill(null);
-      for(const r of state.rows){ if(r.ts > to) break; for(let p=1;p<=state.P;p++){ const v=r.max[p]; if(v===null) continue; const pr=last[p];
-        if(pr && r.ts>=from){ const g=(r.ts-pr.ts)/3600; if(g>0 && g<=settings.gap && Math.abs(v-pr.v)>=settings.thr) ev++; } last[p]={ts:r.ts,v}; } }
-      const bad = state.invalid.filter(x => x.ts>=from && x.ts<=to).length;
-      const m = shellMean(win), mp = shellMean(prev);
-      const lastRow = win[win.length-1]; let cov=0; for(let p=1;p<=state.P;p++) if(lastRow.max[p]!==null) cov++;
-      const perDay = win.length / Math.max(1, (to-from+1)/86400);
-      const refHits = settings.ref ? perPos.filter(x => x.avg >= settings.ref).length : null;
-      const tone = settings.ref ? (peak && peak.v >= settings.ref ? 'action' : 'good') : (mp!==null && m - mp >= 15 ? 'watch' : 'na');
-      const lines = [
-        `${win.length} inspection rounds (${perDay.toFixed(1)} per day); latest round covered ${cov} of ${state.P} positions.`,
-        `Peak ${peak.v} °C at ${posName(peak.p)} on ${fmtShort(peak.ts)}.`,
-        `Average shell Max ${m.toFixed(0)} °C${mp!==null?` (previous period ${mp.toFixed(0)} °C)`:''}; hottest zone by average: ${perPos.slice(0,3).map(x=>`${posName(x.p)} ${x.avg.toFixed(0)} °C`).join(', ')}.`
-      ];
-      const findings = [];
-      if(mp!==null && Math.abs(m-mp) >= 10) findings.push(`Average shell temperature ${m>mp?'rose':'fell'} by ${Math.abs(m-mp).toFixed(0)} °C against the previous period.`);
-      findings.push(`${ev} sudden change${ev===1?'':'s'} of ${settings.thr} °C or more within ${settings.gap} h between back-to-back readings.`);
-      if(cov < state.P) findings.push(`${state.P-cov} positions were not recorded in the latest round.`);
-      if(bad) findings.push(`${bad} reading${bad>1?'s':''} rejected as entry errors.`);
-      if(settings.ref) findings.push(refHits ? `${refHits} position(s) averaged at or above the ${settings.ref} °C reference.` : `No position averaged above the ${settings.ref} °C reference.`);
-      const advice = [
-        `Compare the hottest zone (${perPos.slice(0,2).map(x=>posName(x.p)).join(', ')}) with the refractory and coating history before the next stop.`,
-        ev ? 'Re-shoot positions with sudden rises in the same shift to separate real coating loss from reading errors.' : 'Keep the patrol frequency; no sudden changes flagged.',
-        cov < state.P ? 'Ask the patrol to record every metre mark so the profile stays complete.' : ''
-      ].filter(Boolean);
-      if(!settings.ref) advice.push('Set a plant high-temperature limit on the Kiln Shell Radiation tab to get hot-spot alerts.');
-      return {
-        tone, chip: settings.ref ? (tone==='action' ? 'Above reference' : 'Within reference') : 'No plant limit set',
-        lines, findings, advice,
-        headline: `Kiln shell: peak ${peak.v} °C at ${posName(peak.p)}; average shell Max ${m.toFixed(0)} °C${mp!==null?` (previous ${mp.toFixed(0)} °C)`:''}; ${ev} sudden changes ≥ ${settings.thr} °C.`,
-        plain: `Peak ${peak.v} °C at ${posName(peak.p)}; avg shell ${m.toFixed(0)} °C${mp!==null?` (prev ${mp.toFixed(0)} °C)`:''}; ${ev} sudden changes ≥ ${settings.thr} °C`
-      };
+      if(!state.rows.some(r=>r.ts>=from && r.ts<=to && r.any)) return null;
+      const allPositions=Array.from({length:state.P},(_,i)=>i+1);
+      const shell=analyseRadiationZone(from,to,pFrom,pTo,allPositions,'Whole shell');
+      const burningZone=analyseRadiationZone(from,to,pFrom,pTo,Array.from({length:11},(_,i)=>i+12),BURNING_ZONE.label);
+      const burningText=burningZone.peak ? '; burning-zone peak '+burningZone.peak.value+' °C at '+posName(burningZone.peak.p) : '; burning-zone data unavailable';
+      return {tone:shell.tone,chip:shell.chip,lines:shell.observations,findings:shell.findings,advice:shell.advice,
+        burningZone,headline:shell.headline+burningText,plain:shell.headline+burningText};
     }
   };
 
