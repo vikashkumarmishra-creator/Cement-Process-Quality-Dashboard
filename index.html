@@ -2637,15 +2637,32 @@ const PAYLOAD = {"data":{"limestone":{"ts":[1674522000,1674525600,1674529200,167
     const rate = c => c===null || !Number.isFinite(c) ? 'na' : c >= GOOD ? 'good' : c >= WATCH ? 'watch' : 'action';
     const RATE_LABEL = { good:'Good', watch:'Watch', action:'Action', na:'No data' };
     const label = (sec, p) => (PARAMETER_ORDER[sec] && SUMMARY_LABELS[p]) || (META[sec] && META[sec].params[p]) || p;
-    const targetText = r => !r.hasSpec ? 'Target not set' : r.sec==='limestone' && r.p==='LSF' && Number.isFinite(r.target) ? nf(r.target) + ' (range ' + nf(r.lo) + '–' + nf(r.hi) + ')' : r.maxOnly ? (r.maxExclusive ? '< ' : '≤ ') + nf(r.hi) : nf(r.lo) + '–' + nf(r.hi);
+    const targetText = r => {
+      if(!r.hasSpec) return 'Target not set';
+      const number = v => v.toFixed(r.sec==='clinker' && r.p==='LSF' ? 3 : 2);
+      return r.maxOnly ? (r.maxExclusive ? '< ' : '≤ ') + number(r.hi) : number(r.lo) + '–' + number(r.hi);
+    };
+    // Summary crusher quality always represents HG ILS, independent of other tabs' material selector.
+    const limestoneViews = new WeakMap();
+    function sectionData(sec){
+      if(sec!=='limestone') return DATA[sec];
+      const current=DATA.limestone, raw=current && (current.__raw || current);
+      if(!raw) return null;
+      if(limestoneViews.has(raw)) return limestoneViews.get(raw);
+      const keep=(raw.TypeOfMaterial || []).flatMap((material,i)=>String(material).trim()==='HG ILS' ? [i] : []);
+      const view={};
+      Object.keys(raw).forEach(k=>{if(Array.isArray(raw[k]))view[k]=keep.map(i=>raw[k][i]);});
+      limestoneViews.set(raw,view);
+      return view;
+    }
 
     function values(sec, p, from, to){
-      const s = DATA[sec]; if(!s || !s[p]) return [];
+      const s = sectionData(sec); if(!s || !s[p]) return [];
       const out = [];
       for(let i=0;i<s.ts.length;i++){ const t = s.ts[i]; if(t < from || t > to) continue; const v = s[p][i]; if(v!==null && v!==undefined && isFinite(v)) out.push(v); }
       return out;
     }
-    function count(sec, from, to){ const s = DATA[sec]; if(!s) return 0; let n=0; for(const t of s.ts) if(t>=from && t<=to) n++; return n; }
+    function count(sec, from, to){ const s = sectionData(sec); if(!s) return 0; let n=0; for(const t of s.ts) if(t>=from && t<=to) n++; return n; }
     function stats(arr){
       const n = arr.length; if(!n) return null;
       const mean = arr.reduce((a,b)=>a+b,0)/n;
@@ -2683,7 +2700,7 @@ const PAYLOAD = {"data":{"limestone":{"ts":[1674522000,1674525600,1674529200,167
       return a || GENERIC[r.dir];
     }
     function dailyMeans(sec, p, from, to){
-      const s = DATA[sec]; const m = {}; if(!s || !s[p]) return m;
+      const s = sectionData(sec); const m = {}; if(!s || !s[p]) return m;
       for(let i=0;i<s.ts.length;i++){ const t=s.ts[i]; if(t<from||t>to) continue; const v=s[p][i]; if(v===null||!isFinite(v)) continue; const d=Math.floor(t/86400); (m[d]=m[d]||[]).push(v); }
       Object.keys(m).forEach(k => { const a=m[k]; m[k]=a.reduce((x,y)=>x+y,0)/a.length; });
       return m;
@@ -2719,15 +2736,15 @@ const PAYLOAD = {"data":{"limestone":{"ts":[1674522000,1674525600,1674529200,167
       if(!from || !to){ host.innerHTML = '<p class="desc">Select a date range.</p>'; return; }
       const days = Math.max(1, Math.round((to - from + 1)/86400));
       const pTo = from - 1, pFrom = from - days*86400;
-      $('sumPeriod').textContent = `${fmtD(from)} to ${fmtD(to)} (${days} day${days>1?'s':''}) · compared with the previous ${days} days (${fmtD(pFrom)} to ${fmtD(pTo)}) · Limestone figures: ${typeof limeTag==='function' ? limeTag() : 'HG ILS'}`;
+      $('sumPeriod').textContent = `${fmtD(from)} to ${fmtD(to)} (${days} day${days>1?'s':''}) · compared with the previous ${days} days (${fmtD(pFrom)} to ${fmtD(pTo)}) · Limestone figures: ${'HG ILS'}`;
 
       // ---- per-section parameter reports ----
       const sections = [];
       SECTION_ORDER.forEach(sec => {
-        if(!DATA[sec]) return;
+        if(!sectionData(sec)) return;
         const specs = { ...(SPECS[sec] || {}), ...(SUMMARY_SPECS[sec] || {}) };
         const params = [...new Set([...(PARAMETER_ORDER[sec] || []), ...Object.keys(specs)])];
-        const reps = params.filter(p => includeParameter(sec, p) && ((PARAMETER_ORDER[sec] || []).includes(p) || DATA[sec][p]))
+        const reps = params.filter(p => includeParameter(sec, p) && ((PARAMETER_ORDER[sec] || []).includes(p) || sectionData(sec)[p]))
           .map(p => paramReport(sec, p, specs[p], from, to, pFrom, pTo))
           .filter(r => PARAMETER_ORDER[sec] || r.st);
         const assessed = reps.filter(r => r.comp!==null);
@@ -2874,7 +2891,7 @@ const PAYLOAD = {"data":{"limestone":{"ts":[1674522000,1674525600,1674529200,167
           <div class="card"><h3>Cross-section links</h3><p class="desc">Day-average relationships in this window (|r| ≥ 0.4, at least 7 days). A link is a lead to investigate, not proof of cause.</p>
             ${links.length ? `<ul class="sum-list">${links.slice(0,6).map(l=>`<li>${l.text}</li>`).join('')}</ul>` : '<p class="desc">No strong links found in this window. Try a longer range (30–90 days).</p>'}</div>
           <div class="card"><h3>How to read this page</h3><ul class="sum-list desc">
-            <li>Targets come from the Dim_Parameter sheet (live). Limestone uses ${typeof limeTag==='function' ? esc(limeTag()) : 'HG ILS'} only.</li>
+            <li>Targets come from the Dim_Parameter sheet (live). Limestone uses ${'HG ILS'} only.</li>
             <li>In target = % of results between Min and Max (for fineness residues and kiln-inlet CO only exceeding Max counts as a gap). Specific heat must be strictly below 750 kcal/kg clinker. Parameters without targets are shown but excluded from ratings. Ratings: Good ≥ ${GOOD} %, Watch ≥ ${WATCH} % and &lt; ${GOOD} %, Action &lt; ${WATCH} %.</li>
             <li>Previous period = the same number of days just before the selected range.</li>
             <li>Cpk = how comfortably the process sits inside the band (≥ 1.0 is capable).</li>
