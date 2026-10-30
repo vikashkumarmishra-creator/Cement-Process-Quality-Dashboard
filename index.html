@@ -2679,7 +2679,7 @@ const PAYLOAD = {"data":{"limestone":{"ts":[1674522000,1674525600,1674529200,167
       const cur = values(sec, p, from, to), prev = values(sec, p, pFrom, pTo);
       const st = stats(cur), ps = stats(prev);
       const base = { sec, p, name:label(sec,p), lo, hi, target:spec && spec.target, st, ps,
-        hasSpec, maxOnly, maxExclusive, comp:null, pWithin:null, abovePct:null, belowPct:null,
+        hasSpec, maxOnly, maxExclusive, comp:null, pWithin:null, abovePct:null, belowPct:null, within:null, above:null, below:null,
         dir:null, cpk:null, meanOut:false, severity:0, finer:0 };
       if(!st || !hasSpec) return base;
       const aboveLimit = v => maxExclusive ? v >= hi : v > hi;
@@ -2693,7 +2693,12 @@ const PAYLOAD = {"data":{"limestone":{"ts":[1674522000,1674525600,1674529200,167
       const cpk = st.sd > 0 ? (maxOnly ? (hi - st.mean)/(3*st.sd) : Math.min(hi - st.mean, st.mean - lo)/(3*st.sd)) : null;
       const meanOut = !inTarget(st.mean);
       const severity = (100 - comp) + (meanOut ? 15 : 0) + (pWithin!==null && comp < pWithin - 10 ? 10 : 0);
-      return { ...base, comp, pWithin, abovePct, belowPct, dir, cpk, meanOut, severity, finer };
+      return { ...base, comp, pWithin, abovePct, belowPct, within, above, below, dir, cpk, meanOut, severity, finer };
+    }
+    function limitCell(r, side){
+      if(r.comp===null) return '—';
+      const value=side==='above' ? r.abovePct : r.belowPct;
+      return value.toFixed(2) + ' % (' + r[side] + '/' + r.st.n + ')';
     }
     function advice(r){
       const a = (ADVICE[r.sec] && ADVICE[r.sec][r.p] && ADVICE[r.sec][r.p][r.dir]) || '';
@@ -2842,7 +2847,7 @@ const PAYLOAD = {"data":{"limestone":{"ts":[1674522000,1674525600,1674529200,167
         shownOff.forEach(r => {
           const side = r.dir==='variable' ? `${Math.round(r.abovePct)} % above and ${Math.round(r.belowPct)} % below the band` : r.dir==='high' ? `${Math.round(r.abovePct)} % of results ${r.maxExclusive ? 'at or above' : 'above'} ${nf(r.hi)}` : `${Math.round(r.belowPct)} % of results below ${nf(r.lo)}`;
           const trend = r.pWithin===null ? '' : r.comp < r.pWithin - 5 ? `, worse than previous (${pctValue(r.pWithin)} %)` : r.comp > r.pWithin + 5 ? `, better than previous (${pctValue(r.pWithin)} %)` : `, similar to previous (${pctValue(r.pWithin)} %)`;
-          const cap = r.cpk!==null && r.cpk < 1 ? ` Process capability Cpk ${r.cpk.toFixed(2)} (below 1.0 means the process cannot hold this band).` : '';
+          const cap = r.cpk!==null && r.cpk < 1 ? ` Capability estimate Cpk ${r.cpk.toFixed(2)} (below 1.0 indicates limited margin relative to observed variation; confirm process stability before drawing capability conclusions).` : '';
           find.push(`<b>${esc(r.name)}</b>: ${side}${trend}.${cap}`);
         });
         extras.filter(e => e.sec===s.sec && (e.tone==='watch' || e.tone==='action')).forEach(e => find.push(e.text));
@@ -2853,7 +2858,7 @@ const PAYLOAD = {"data":{"limestone":{"ts":[1674522000,1674525600,1674529200,167
         if(noTargets.length) adv.push(`Set Min/Max limits in Dim_Parameter for ${noTargets.map(r=>esc(r.name)).join(', ')} to enable compliance ratings.`);
         if(!adv.length) adv.push('Keep current practice; continue monitoring.');
         const rows = s.reps.map(r => `<tr><td>${esc(r.name)}</td><td class="num">${esc(targetText(r))}</td><td class="num">${r.st ? nf(r.st.mean) : '—'}</td><td class="num">${r.st ? nf(r.st.sd) : '—'}</td>
-          <td class="num"><span class="sum-dot ${rate(r.comp)}"></span>${r.comp===null ? (r.hasSpec ? 'No data' : 'Target not set') : pctValue(r.comp) + ' %'}</td><td class="num">${r.comp===null ? '—' : Math.round(r.abovePct) + ' / ' + Math.round(r.belowPct)}</td>
+          <td class="num"><span class="sum-dot ${rate(r.comp)}"></span>${r.comp===null ? (r.hasSpec ? 'No data' : 'Target not set') : pctValue(r.comp) + ' %'}</td><td class="num">${r.comp===null ? '—' : limitCell(r,'above')}</td><td class="num">${limitCell(r,'below')}</td>
           <td class="num">${r.pWithin===null?'—':pctValue(r.pWithin)+' %'}</td><td class="num">${r.cpk===null?'—':r.cpk.toFixed(2)}</td><td class="num">${r.st ? r.st.n : 0}</td></tr>`).join('');
         return `<div class="card sum-sec" id="sum-${s.sec}">
           <div class="row-between"><h3>${esc(SECTION_NAME[s.sec])}</h3><span class="sum-chip ${rt}">${s.comp===null?'No targets':RATE_LABEL[rt]+' · '+pctValue(s.comp)+' % in target'}</span></div>
@@ -2862,7 +2867,7 @@ const PAYLOAD = {"data":{"limestone":{"ts":[1674522000,1674525600,1674529200,167
             <div><h4>Finding</h4><ul>${find.map(x=>`<li>${x}</li>`).join('')}</ul></div>
             <div><h4>Advice <small>suggested checks — verify on site</small></h4><ul>${adv.map(x=>`<li>${x}</li>`).join('')}</ul></div>
           </div>
-          ${rows ? `<details class="sum-details"><summary>Parameter detail</summary><div class="rad-table-wrap"><table class="qtable"><tr><th>Parameter</th><th>Target</th><th>Average</th><th>SD</th><th>In target</th><th>% above / below</th><th>Previous</th><th>Cpk</th><th>n</th></tr>${rows}</table></div></details>` : ''}
+          ${rows ? `<details class="sum-details"><summary>Parameter detail</summary><p class="desc">Above / Below = readings outside the applicable limit ÷ valid readings for that parameter in the selected period. Counts appear in brackets; boundary readings are in range unless the target uses &lt;. Upper-limit-only parameters have no lower failure limit. Percentages are rounded to two decimals.</p><div class="rad-table-wrap"><table class="qtable"><tr><th>Parameter</th><th>Target</th><th>Average</th><th>SD</th><th>In target</th><th>Above range % (count/n)</th><th>Below range % (count/n)</th><th>Previous</th><th title="Capability estimate: distance from the average to the nearest limit divided by 3 × SD. Uses overall selected-period SD; process stability and normality are not assessed.">Cpk</th><th>n</th></tr>${rows}</table></div></details>` : ''}
         </div>`;
       };
 
